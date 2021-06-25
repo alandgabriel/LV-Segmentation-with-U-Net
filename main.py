@@ -243,12 +243,10 @@ class SegmentationAugmentation(nn.Module):
 class SegmentationDataSet(data.Dataset):
     def __init__(self,
                  inputs: list,
-                 targets: list,
-                 transform=None
+                 targets: list
                  ):
         self.inputs = inputs
         self.targets = targets
-        self.transform = transform
         self.inputs_dtype = torch.float32
         self.targets_dtype = torch.long
 
@@ -264,9 +262,6 @@ class SegmentationDataSet(data.Dataset):
         # Load input and target
         x, y = imread(input_ID), imread(target_ID)
 
-        # Preprocessing
-        if self.transform is not None:
-            x, y = self.transform(x, y)
 
         # Typecasting
         x, y = torch.from_numpy(x).type(self.inputs_dtype), torch.from_numpy(y).type(self.targets_dtype)
@@ -303,14 +298,15 @@ test_labels = [mask_files[e] for e in ixRand[round(N*.8):]]
 
 # torch needs that data comes from an instance with getitem and len methods (Map-style datasets)
 
-training_dataset = SegmentationDataSet(inputs=train_data, targets=train_labels, transform=True)
-training_dataloader = data.DataLoader(dataset=training_dataset, batch_size=32, shuffle=True, pin_memory=torch.cuda.is_available(), num_workers=8)
+training_dataset = SegmentationDataSet(inputs=train_data, targets=train_labels)
+training_dataloader = data.DataLoader(dataset=training_dataset, shuffle=True, pin_memory=torch.cuda.is_available(), num_workers=8)
 
-val_dataset = SegmentationDataSet(inputs=test_data, targets=test_labels, transform=True)
-val_dataloader = data.DataLoader(dataset=val_dataset, batch_size=32, shuffle=True, pin_memory=torch.cuda.is_available(), num_workers=8)
+val_dataset = SegmentationDataSet(inputs=test_data, targets=test_labels)
+val_dataloader = data.DataLoader(dataset=val_dataset, shuffle=True, pin_memory=torch.cuda.is_available(), num_workers=8)
 
 
 #%%
+'''
 epochs = 20
 best_score = 0.0
 validation_cadence = 5
@@ -322,18 +318,155 @@ for epoch_ndx in range(1, epochs + 1):
     if epoch_ndx == 1 or epoch_ndx % validation_cadence == 0:
         # if validation is wanted
         valMetrics_t = seg.doValidation(epoch_ndx, val_dataloader)
-
+'''
 
 #%%
+import torch.optim as optim
+from tqdm import tqdm
+import torch
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-segmentation_model = UNetWrapper(
+
+learning_rate = 1e-3
+epochs = 5
+
+net = UNetWrapper(
     in_channels=3,
     n_classes=1,   #output channels
     depth=3,
     wf=4,
-    padding=True,
-    batch_norm=True,
-    up_mode='upconv',
+    padding=True,    up_mode='upconv')
+net.to(torch.device('cuda'))
+
+def train_loop(dataloader, model, loss_fn, optimizer):
+    size = len(dataloader.dataset)
+    for batch, (X, y) in enumerate(dataloader):
+        # Compute prediction and loss
+        pred = model(X)
+        loss = loss_fn(pred, y)
+
+        # Backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if batch % 100 == 0:
+            loss, current = loss.item(), batch * len(X)
+            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+
+
+def test_loop(dataloader, model, loss_fn):
+    size = len(dataloader.dataset)
+    test_loss, correct = 0, 0
+
+    with torch.no_grad():
+        for X, y in dataloader:
+            pred = model(X)
+            test_loss += loss_fn(pred, y).item()
+            correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+
+    test_loss /= size
+    correct /= size
+    print(f"Test Error: \n Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>8f} \n")
+
+loss_fn = nn.CrossEntropyLoss()
+optimizer = torch.optim.SGD(net.parameters(), lr=learning_rate)
+
+epochs = 10
+for t in range(epochs):
+    print(f"Epoch {t+1}\n-------------------------------")
+    train_loop(training_dataloader, net, loss_fn, optimizer)
+    test_loop(val_dataloader, net, loss_fn)
+print("Done!")
+
+#%%
+
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+from torchvision import datasets
+from torchvision.transforms import ToTensor, Lambda
+
+training_data = datasets.FashionMNIST(
+    root="data",
+    train=True,
+    download=True,
+    transform=ToTensor()
 )
-segmentation_model.to(device)
+
+test_data = datasets.FashionMNIST(
+    root="data",
+    train=False,
+    download=True,
+    transform=ToTensor()
+)
+
+train_dataloader = DataLoader(training_data, batch_size=64)
+test_dataloader = DataLoader(test_data, batch_size=64)
+
+class NeuralNetwork(nn.Module):
+    def __init__(self):
+        super(NeuralNetwork, self).__init__()
+        self.flatten = nn.Flatten()
+        self.linear_relu_stack = nn.Sequential(
+            nn.Linear(28*28, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 10),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        x = self.flatten(x)
+        logits = self.linear_relu_stack(x)
+        return logits
+
+model = NeuralNetwork()
+
+learning_rate = 1e-3
+batch_size = 64
+epochs = 5
+# Initialize the loss function
+loss_fn = nn.CrossEntropyLoss()
+
+optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+
+def train_loop(dataloader, model, loss_fn, optimizer):
+    size = len(dataloader.dataset)
+    for batch, (X, y) in enumerate(dataloader):
+        # Compute prediction and loss
+        pred = model(X)
+        loss = loss_fn(pred, y)
+
+        # Backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if batch % 100 == 0:
+            loss, current = loss.item(), batch * len(X)
+            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+
+
+def test_loop(dataloader, model, loss_fn):
+    size = len(dataloader.dataset)
+    test_loss, correct = 0, 0
+
+    with torch.no_grad():
+        for X, y in dataloader:
+            pred = model(X)
+            test_loss += loss_fn(pred, y).item()
+            correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+
+    test_loss /= size
+    correct /= size
+    print(f"Test Error: \n Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>8f} \n")
+loss_fn = nn.CrossEntropyLoss()
+optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+
+epochs = 10
+for t in range(epochs):
+    print(f"Epoch {t+1}\n-------------------------------")
+    train_loop(train_dataloader, net, loss_fn, optimizer)
+    test_loop(test_dataloader, net, loss_fn)
+print("Done!")
